@@ -1,141 +1,125 @@
-import numpy as np
+import json
 
 
-def parse(s: str) -> dict:
-    if s.startswith('[') and s.endswith(']'):
-        s = s[1:-1].strip()
+def membership(x, points):
+    """
+    Значение функции принадлежности в точке x
+    points = [[x1, y1], [x2, y2], ...]
+    """
+    for i in range(len(points) - 1):
+        x1, y1 = points[i]
+        x2, y2 = points[i + 1]
 
-    index_map = {}
-    index = 0
-    i = 0
-    n = len(s)
+        if x1 <= x <= x2:
+            if x2 == x1:
+                return max(y1, y2)
+            return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
 
-    while i < n:
-        if s[i] == '[':
-            j = s.find(']', i)
-            if j == -1:
-                raise ValueError("Нет закрывающей скобки ']'")
-            content = s[i+1:j]
-            items = [t.strip() for t in content.split(',') if t.strip() != ""]
-            for tok in items:
-                index_map[tok] = index
-            index += 1
-            i = j + 1
-        elif s[i] == ',' or s[i].isspace():
-            i += 1
-        else:
-            start = i
-            while i < n and s[i] not in ',[':
-                i += 1
-            tok = s[start:i].strip()
-            if tok:
-                index_map[tok] = index
-                index += 1
-    return index_map
+    return 0.0
 
 
-def matrix(index_map, elements):
-    n = len(elements)
-    matrix = np.zeros((n, n), bool)
-    for first_idx_elem in range(n):
-        first_idx_map = index_map[elements[first_idx_elem]]
-        for second_idx_elem in range(n):
-            second_idx_map = index_map[elements[second_idx_elem]]
-            if first_idx_map <= second_idx_map:
-                matrix[first_idx_elem][second_idx_elem] = 1
-    return matrix
+def main(temp_sets_json, control_sets_json, rules_json, temperature):
+    temp_sets = json.loads(temp_sets_json)["температура"]
+    control_sets = json.loads(control_sets_json)["температура"]
+    rules = json.loads(rules_json)
 
+    # фаззификация температуры
+    temp_mu = {}
+    for term in temp_sets:
+        mu = membership(temperature, term["points"])
+        temp_mu[term["id"]] = mu
 
-def main(str1: str, str2: str):
-    elements = [item.strip(',[]') for item in str1.split(',')]
+    print("Фаззификация температуры:")
+    for k, v in temp_mu.items():
+        print(f"  {k}: {v:.4f}")
 
-    index_map_A = parse(str1)
-    index_map_B = parse(str2)
-    matrix_A = matrix(index_map_A, elements)
-    matrix_B = matrix(index_map_B, elements)
+    # применение правил
+    control_mu = {term["id"]: 0.0 for term in control_sets}
 
-    matrix_AT = matrix_A.T
-    matrix_BT = matrix_B.T
+    print("\nПрименение правил:")
+    for temp_term, control_term in rules:
+        activation = temp_mu.get(temp_term, 0.0)
+        control_mu[control_term] = max(control_mu[control_term], activation)
+        print(f"  ЕСЛИ {temp_term} → {control_term}: {activation:.4f}")
 
-    matrix_AB = matrix_A * matrix_B
-    matrix_ABT = matrix_AT * matrix_BT
-    matrix_dis = matrix_AB + matrix_ABT
+    # дефаззификация (центр тяжести)
+    xs = []
+    mus = []
 
-    # Ядро противоречий
-    false_coords = list(zip(*np.where(~matrix_dis)))
-    unique_pairs_index = {tuple(sorted(p)) for p in false_coords}
-    contradictions = [(elements[i], elements[j])
-                      for i, j in unique_pairs_index]
+    # область определения управления
+    x_min = min(p[0] for t in control_sets for p in t["points"])
+    x_max = max(p[0] for t in control_sets for p in t["points"])
 
-    # Матрица согласованного порядка
-    C = matrix_AB.copy()
+    step = 0.1
+    x = x_min
+    while x <= x_max:
+        mu_x = 0.0
+        for term in control_sets:
+            mu_term = membership(x, term["points"])
+            mu_x = max(mu_x, min(mu_term, control_mu[term["id"]]))
+        xs.append(x)
+        mus.append(mu_x)
+        x += step
 
-    # Учёт противоречий
-    for (a, b) in contradictions:
-        i = elements.index(a)
-        j = elements.index(b)
-        C[i, j] = 1
-        C[j, i] = 1
+    numerator = sum(x * mu for x, mu in zip(xs, mus))
+    denominator = sum(mus)
 
-    # Матрица эквивалентности
-    E = C * C.T
+    result = numerator / denominator if denominator != 0 else 0.0
 
-    # Транзитивное замыкание матрицы E
-    n = len(elements)
-    E_star = E.copy()
-    for k in range(n):
-        for i in range(n):
-            for j in range(n):
-                E_star[i, j] = E_star[i, j] or (E_star[i, k] and E_star[k, j])
-
-    # Поиск компонентов связности — кластеров
-    visited = [False] * n
-    clusters = []
-    for i in range(n):
-        if not visited[i]:
-            cluster = []
-            for j in range(n):
-                if E_star[i, j]:
-                    cluster.append(elements[j])
-                    visited[j] = True
-            clusters.append(cluster)
-
-    # Сортировка кластеров по матрице C
-    def cluster_less(c1, c2):
-        for a in c1:
-            ia = elements.index(a)
-            for b in c2:
-                ib = elements.index(b)
-                if C[ia, ib] == 0:
-                    return False
-        return True
-
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(clusters) - 1):
-            if cluster_less(clusters[i+1], clusters[i]):
-                clusters[i], clusters[i+1] = clusters[i+1], clusters[i]
-                changed = True
-
-    result = []
-    for c in clusters:
-        if len(c) == 1:
-            result.append(c[0])
-        else:
-            result.append(c)
+    print("\nДефаззификация:")
+    print(f"  Числитель: {numerator:.4f}")
+    print(f"  Знаменатель: {denominator:.4f}")
+    print(f"  Управление: {result:.4f}")
 
     return result
 
+temp_json = json.dumps({
+    "температура": [
+        {
+            "id": "холодно",
+            "points": [[0,1],[18,1],[22,0],[50,0]]
+        },
+        {
+            "id": "комфортно",
+            "points": [[18,0],[22,1],[24,1],[26,0]]
+        },
+        {
+            "id": "жарко",
+            "points": [[0,0],[24,0],[26,1],[50,1]]
+        }
+    ]
+})
 
-str1 = '[1,[2,3],4,[5,6,7],8,9,10]'
-str2 = '[[1,2],[3,4,5],6,7,9,[8,10]]'
-print(main(str1, str2))
+control_json = json.dumps({
+    "температура": [
+        {
+            "id": "слабый",
+            "points": [[0,0],[0,1],[5,1],[8,0]]
+        },
+        {
+            "id": "умеренный",
+            "points": [[5,0],[8,1],[13,1],[16,0]]
+        },
+        {
+            "id": "интенсивный",
+            "points": [[13,0],[18,1],[23,1],[26,0]]
+        }
+    ]
+})
 
-str3 = "[x1,[x2,x3],x4,[x5,x6,x7],x8,x9,x10]"
-str4 = "[x3,[x1,x4],x2,x6,[x5,x7,x8],[x9,x10]]"
-# print(main(str3, str4))
+rules_json = json.dumps([
+    ["холодно", "интенсивный"],
+    ["комфортно", "умеренный"],
+    ["жарко", "слабый"]
+])
 
-str5 = '[T,[K,M],D,Z]'
-str6 = '[[T,K],M,Z,D]'
-# print(main(str5, str6))
+temperature_value = 20.0
+
+result = main(
+    temp_json,
+    control_json,
+    rules_json,
+    temperature_value
+)
+
+print("Оптимальное управление:", result)
